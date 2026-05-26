@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Live Text POC</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; }
+    body { font: 14px system-ui, sans-serif; background: #fafafa; display: flex; flex-direction: column; }
+
+    header {
+      padding: 10px 14px; background: white; border-bottom: 1px solid #ddd;
+      display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+    }
+    header input[type="text"] { flex: 1; min-width: 280px; padding: 6px 10px; font: inherit; }
+    header input[type="password"] { width: 240px; padding: 6px 10px; font: inherit; }
+    header button { padding: 6px 14px; cursor: pointer; font: inherit; }
+    header label { display: flex; gap: 6px; align-items: center; user-select: none; cursor: pointer; }
+    #status { font-size: 12px; color: #666; min-width: 160px; }
+
+    main { display: flex; flex: 1; min-height: 0; }
+
+    #image-pane { flex: 1; overflow: auto; padding: 14px; background: #f0f0f0; position: relative; }
+    #image-pane.scrollable { cursor: grab; }
+    #image-pane.panning { cursor: grabbing; }
+    #image-pane.panning * { cursor: grabbing !important; user-select: none; }
+    #zoom-spacer { margin: 0 auto; }
+
+    #loader {
+      position: absolute; inset: 0; z-index: 10;
+      display: none; align-items: center; justify-content: center;
+      background: rgba(240, 240, 240, 0.85);
+    }
+    body.loading #loader { display: flex; }
+    .spinner {
+      width: 48px; height: 48px;
+      border: 4px solid rgba(0, 0, 0, 0.12);
+      border-top-color: #555;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .image-container { position: relative; transform-origin: top left; }
+    .image-container img { display: block; width: 100%; height: auto; user-select: none; -webkit-user-drag: none; }
+
+    .zoom-controls { display: inline-flex; gap: 2px; align-items: center; }
+    .zoom-controls button { padding: 4px 10px; min-width: 32px; cursor: pointer; font: inherit; }
+    #zoom-label { display: inline-block; min-width: 48px; text-align: center; font-variant-numeric: tabular-nums; }
+
+    .word {
+      position: absolute;
+      color: transparent;
+      white-space: nowrap;
+      overflow: hidden;
+      cursor: text;
+      line-height: 1;
+      font-family: monospace;
+      transform-origin: top left;
+    }
+    .word::selection { background: rgba(0, 120, 255, 0.35); color: transparent; }
+    .word::-moz-selection { background: rgba(0, 120, 255, 0.35); color: transparent; }
+
+    body.debug .word { color: #c00; background: rgba(255, 235, 0, 0.35); outline: 1px solid rgba(200, 0, 0, 0.5); }
+
+    #text-pane { width: 40%; min-width: 320px; padding: 14px; display: flex; flex-direction: column; border-left: 1px solid #ddd; background: white; }
+    #text-pane label { font-weight: 600; margin-bottom: 6px; }
+    #text-pane textarea { flex: 1; padding: 10px; font: inherit; resize: none; }
+  </style>
+</head>
+<body>
+  <header>
+    <input id="url" type="text" placeholder="Image URL" value="https://icf.listex.info/raw/8f4e248a-1165-34c0-2215-a0130c3b37bb.jpg">
+    <input id="api-key" type="password" placeholder="Google Vision API key" autocomplete="off" spellcheck="false">
+    <button id="load">Load &amp; OCR</button>
+    <span class="zoom-controls">
+      <button id="zoom-out" title="Zoom out">−</button>
+      <button id="zoom-reset" title="Reset to 100%"><span id="zoom-label">100%</span></button>
+      <button id="zoom-in" title="Zoom in">+</button>
+    </span>
+    <label><input type="checkbox" id="debug"> Show overlay</label>
+    <span id="status">Ready</span>
+  </header>
+
+  <main>
+    <div id="image-pane">
+      <div id="zoom-spacer">
+        <div class="image-container" id="container">
+          <img id="image" alt="">
+        </div>
+      </div>
+      <div id="loader"><div class="spinner"></div></div>
+    </div>
+    <div id="text-pane">
+      <label for="textarea">Transcription</label>
+      <textarea id="textarea" placeholder="Select text on the image (left), copy with Ctrl/Cmd+C, paste here."></textarea>
+    </div>
+  </main>
+
+  <script>
+    const $ = id => document.getElementById(id);
+    const setStatus = msg => { $('status').textContent = msg; };
+
+    $('debug').addEventListener('change', e => {
+      document.body.classList.toggle('debug', e.target.checked);
+    });
+
+    $('load').addEventListener('click', loadImage);
+    $('url').addEventListener('keydown', e => { if (e.key === 'Enter') loadImage(); });
+    $('api-key').addEventListener('keydown', e => { if (e.key === 'Enter') loadImage(); });
+
+    let zoom = 1;
+    let baseWidth = 0, baseHeight = 0;
+    let isLoading = false;
+
+    function setLoading(loading) {
+      isLoading = loading;
+      document.body.classList.toggle('loading', loading);
+      for (const el of document.querySelectorAll('header input, header button')) {
+        el.disabled = loading;
+      }
+    }
+
+    async function loadImage() {
+      if (isLoading) return;
+      const imageUrl = $('url').value.trim();
+      const apiKey = $('api-key').value.trim();
+      if (!imageUrl) return;
+      if (!apiKey) { setStatus('API key required'); $('api-key').focus(); return; }
+
+      setLoading(true);
+      const container = $('container');
+      const spacer = $('zoom-spacer');
+      const img = $('image');
+      const pane = $('image-pane');
+
+      try {
+        container.querySelectorAll('.word').forEach(n => n.remove());
+        container.style.transform = 'none';
+        container.style.width = '';
+        spacer.style.width = '';
+        spacer.style.height = '';
+        img.style.maxWidth = '100%';
+        img.style.width = '';
+        pane.scrollLeft = 0;
+        pane.scrollTop = 0;
+        zoom = 1;
+
+        img.src = imageUrl;
+        setStatus('Loading image and running OCR…');
+
+        const [_, data] = await Promise.all([imageLoaded(img), runOCR(imageUrl, apiKey)]);
+        if (data.error) {
+          setStatus('OCR error: ' + (data.error.message || JSON.stringify(data.error)));
+          return;
+        }
+
+        await new Promise(r => requestAnimationFrame(r));
+        baseWidth = img.clientWidth;
+        baseHeight = img.clientHeight;
+        container.style.width = baseWidth + 'px';
+        img.style.maxWidth = '';
+        img.style.width = '100%';
+
+        renderOverlay(data.words);
+        fitWords();
+        applyZoom();
+        setStatus(`${data.words.length} words${data.cached ? ' (cached)' : ''}`);
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    function applyZoom() {
+      $('container').style.transform = `scale(${zoom})`;
+      $('zoom-spacer').style.width  = (baseWidth  * zoom) + 'px';
+      $('zoom-spacer').style.height = (baseHeight * zoom) + 'px';
+      $('zoom-label').textContent = Math.round(zoom * 100) + '%';
+      const pane = $('image-pane');
+      const scrollable = pane.scrollWidth > pane.clientWidth || pane.scrollHeight > pane.clientHeight;
+      pane.classList.toggle('scrollable', scrollable);
+    }
+
+    const MIN_ZOOM = 0.25, MAX_ZOOM = 10;
+    function setZoom(newZoom, anchorX, anchorY) {
+      newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, newZoom));
+      if (newZoom === zoom || !baseWidth) return;
+      const pane = $('image-pane');
+      if (anchorX !== undefined) {
+        const ratio = newZoom / zoom;
+        const newScrollLeft = (pane.scrollLeft + anchorX) * ratio - anchorX;
+        const newScrollTop  = (pane.scrollTop  + anchorY) * ratio - anchorY;
+        zoom = newZoom;
+        applyZoom();
+        pane.scrollLeft = newScrollLeft;
+        pane.scrollTop  = newScrollTop;
+      } else {
+        zoom = newZoom;
+        applyZoom();
+      }
+    }
+
+    function paneCenter() {
+      const pane = $('image-pane');
+      return [pane.clientWidth / 2, pane.clientHeight / 2];
+    }
+    $('zoom-in').addEventListener('click',    () => setZoom(zoom * 1.25, ...paneCenter()));
+    $('zoom-out').addEventListener('click',   () => setZoom(zoom / 1.25, ...paneCenter()));
+    $('zoom-reset').addEventListener('click', () => setZoom(1,           ...paneCenter()));
+
+    $('image-pane').addEventListener('wheel', (e) => {
+      e.preventDefault();
+      const rect = e.currentTarget.getBoundingClientRect();
+      const anchorX = e.clientX - rect.left;
+      const anchorY = e.clientY - rect.top;
+      const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+      setZoom(zoom * factor, anchorX, anchorY);
+    }, { passive: false });
+
+    // Click-and-drag pan. Only kicks in when the mousedown isn't on a word span,
+    // so text selection still works when the user starts on the label text.
+    let panState = null;
+    $('image-pane').addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      if (e.target.classList.contains('word')) return;
+      const pane = e.currentTarget;
+      if (!pane.classList.contains('scrollable')) return;
+      e.preventDefault();
+      panState = {
+        startX: e.clientX, startY: e.clientY,
+        startScrollLeft: pane.scrollLeft, startScrollTop: pane.scrollTop,
+      };
+      pane.classList.add('panning');
+    });
+    window.addEventListener('mousemove', (e) => {
+      if (!panState) return;
+      const pane = $('image-pane');
+      pane.scrollLeft = panState.startScrollLeft - (e.clientX - panState.startX);
+      pane.scrollTop  = panState.startScrollTop  - (e.clientY - panState.startY);
+    });
+    window.addEventListener('mouseup', () => {
+      if (!panState) return;
+      panState = null;
+      $('image-pane').classList.remove('panning');
+    });
+
+    async function runOCR(imageUrl, apiKey) {
+      const res = await fetch('/ocr', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ imageUrl, apiKey, languageHints: ['uk', 'en'] })
+      });
+      return res.json();
+    }
+
+    function imageLoaded(img) {
+      return img.complete && img.naturalWidth
+        ? Promise.resolve()
+        : new Promise((resolve, reject) => {
+            img.addEventListener('load', resolve, { once: true });
+            img.addEventListener('error', reject, { once: true });
+          });
+    }
+
+    function renderOverlay(words) {
+      const img = $('image');
+      const scale = img.clientWidth / img.naturalWidth;
+      const container = $('container');
+      const frag = document.createDocumentFragment();
+
+      for (const w of words) {
+        const span = document.createElement('span');
+        span.className = 'word';
+        span.textContent = w.text;
+        span.style.left     = (w.x * scale) + 'px';
+        span.style.top      = (w.y * scale) + 'px';
+        span.style.width    = (w.w * scale) + 'px';
+        span.style.height   = (w.h * scale) + 'px';
+        span.style.fontSize = (w.h * scale) + 'px';
+        frag.appendChild(span);
+      }
+      container.appendChild(frag);
+    }
+
+    // Stretch each word horizontally so the rendered text exactly fills its bbox.
+    // Without this, characters overflow or fall short of the box, hurting cursor accuracy.
+    function fitWords() {
+      const spans = document.querySelectorAll('.word');
+      for (const span of spans) {
+        const boxW = span.offsetWidth;
+        const textW = span.scrollWidth;
+        if (textW > 0 && boxW > 0) {
+          span.style.transform = `scaleX(${boxW / textW})`;
+          span.style.width = textW + 'px';
+        }
+      }
+    }
+
+    // Absolutely-positioned spans are out of flow, so Range.toString() can drop
+    // whitespace between them. Build the clipboard text from word spans directly,
+    // preserving each word's trailing space/newline as the server provided it.
+    document.addEventListener('copy', (e) => {
+      const sel = window.getSelection();
+      if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
+      const range = sel.getRangeAt(0);
+      const container = $('container');
+      if (!container.contains(range.commonAncestorContainer)) return;
+
+      const parts = [];
+      for (const span of container.querySelectorAll('.word')) {
+        if (!range.intersectsNode(span)) continue;
+        const text = span.textContent;
+        const node = span.firstChild;
+        const startOff = (range.startContainer === node) ? range.startOffset : 0;
+        const endOff   = (range.endContainer   === node) ? range.endOffset   : text.length;
+        parts.push(text.substring(startOff, endOff));
+      }
+      if (parts.length === 0) return;
+
+      const text = parts.join('').replace(/\n/g, ' ');
+      e.clipboardData.setData('text/plain', text);
+      e.preventDefault();
+    });
+
+    let resizeTimer;
+    window.addEventListener('resize', () => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        if ($('image').naturalWidth) loadImage();
+      }, 150);
+    });
+
+    loadImage();
+  </script>
+</body>
+</html>
