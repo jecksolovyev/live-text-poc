@@ -12,7 +12,8 @@
       padding: 10px 14px; background: white; border-bottom: 1px solid #ddd;
       display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
     }
-    header input[type="text"] { flex: 1; min-width: 280px; padding: 6px 10px; font: inherit; }
+    header input[type="text"] { flex: 0 0 auto; width: 380px; padding: 6px 10px; font: inherit; }
+    #status { flex: 1; }
     header input[type="password"] { width: 240px; padding: 6px 10px; font: inherit; }
     header button { padding: 6px 14px; cursor: pointer; font: inherit; }
     header label { display: flex; gap: 6px; align-items: center; user-select: none; cursor: pointer; }
@@ -41,8 +42,60 @@
     }
     @keyframes spin { to { transform: rotate(360deg); } }
 
-    .image-container { position: relative; transform-origin: top left; }
+    #toasts {
+      position: fixed; top: 64px; right: 16px; z-index: 1000;
+      display: flex; flex-direction: column; gap: 8px;
+      pointer-events: none; max-width: 440px;
+    }
+    .toast {
+      background: #c62828; color: white;
+      padding: 12px 16px; border-radius: 6px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+      pointer-events: auto;
+      display: flex; gap: 12px; align-items: flex-start;
+      animation: toast-in 0.18s ease-out;
+      font-size: 13px; line-height: 1.4;
+    }
+    .toast .toast-msg { flex: 1; word-break: break-word; }
+    .toast button {
+      background: transparent; border: none; color: white;
+      cursor: pointer; font-size: 18px; line-height: 1; padding: 0;
+      opacity: 0.85;
+    }
+    .toast button:hover { opacity: 1; }
+    @keyframes toast-in { from { transform: translateX(16px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+
+    .image-container { position: relative; transform-origin: top left; overflow: hidden; }
     .image-container img { display: block; width: 100%; height: auto; user-select: none; -webkit-user-drag: none; }
+
+    .mask-window {
+      position: absolute;
+      border: none;
+      box-shadow:
+        0 0 0 9999px rgba(0, 0, 0, 0.55),
+        inset 0 0 0 1px rgba(0, 0, 0, 0.9);
+      pointer-events: none;
+      z-index: 2;
+    }
+    .mask-handle { position: absolute; pointer-events: auto; }
+    .mask-handle.n  { left: 6px; right: 6px; top: -4px; height: 9px; cursor: ns-resize; }
+    .mask-handle.s  { left: 6px; right: 6px; bottom: -4px; height: 9px; cursor: ns-resize; }
+    .mask-handle.e  { top: 6px; bottom: 6px; right: -4px; width: 9px; cursor: ew-resize; }
+    .mask-handle.w  { top: 6px; bottom: 6px; left: -4px; width: 9px; cursor: ew-resize; }
+    .mask-handle.nw { top: -5px; left: -5px; width: 12px; height: 12px; cursor: nwse-resize; }
+    .mask-handle.ne { top: -5px; right: -5px; width: 12px; height: 12px; cursor: nesw-resize; }
+    .mask-handle.sw { bottom: -5px; left: -5px; width: 12px; height: 12px; cursor: nesw-resize; }
+    .mask-handle.se { bottom: -5px; right: -5px; width: 12px; height: 12px; cursor: nwse-resize; }
+
+    body.alt-down #image-pane, body.alt-down #image-pane * { cursor: crosshair !important; }
+    .word.masked-out { user-select: none; pointer-events: none; opacity: 0.25; }
+    body.debug .word.masked-out { opacity: 0.35; }
+
+    #clear-mask {
+      background: rgba(0, 120, 255, 0.12);
+      border: 1px solid rgba(0, 120, 255, 0.5);
+      color: #1565c0;
+    }
 
     .zoom-controls { display: inline-flex; gap: 2px; align-items: center; }
     .zoom-controls button { padding: 4px 10px; min-width: 32px; cursor: pointer; font: inherit; }
@@ -74,10 +127,13 @@
     <input id="api-key" type="password" placeholder="Google Vision API key" autocomplete="off" spellcheck="false">
     <button id="load">Load &amp; OCR</button>
     <span class="zoom-controls">
+      <button id="rotate-left" title="Rotate 90° left">↺</button>
+      <button id="rotate-right" title="Rotate 90° right">↻</button>
       <button id="zoom-out" title="Zoom out">−</button>
       <button id="zoom-reset" title="Reset to 100%"><span id="zoom-label">100%</span></button>
       <button id="zoom-in" title="Zoom in">+</button>
     </span>
+    <button id="clear-mask" title="Clear selection mask" hidden>✕ Clear mask</button>
     <label><input type="checkbox" id="debug"> Show overlay</label>
     <span id="status">Ready</span>
   </header>
@@ -87,6 +143,16 @@
       <div id="zoom-spacer">
         <div class="image-container" id="container">
           <img id="image" alt="">
+          <div class="mask-window" id="mask-window" hidden>
+            <div class="mask-handle n"  data-edge="n"></div>
+            <div class="mask-handle s"  data-edge="s"></div>
+            <div class="mask-handle e"  data-edge="e"></div>
+            <div class="mask-handle w"  data-edge="w"></div>
+            <div class="mask-handle nw" data-edge="nw"></div>
+            <div class="mask-handle ne" data-edge="ne"></div>
+            <div class="mask-handle sw" data-edge="sw"></div>
+            <div class="mask-handle se" data-edge="se"></div>
+          </div>
         </div>
       </div>
       <div id="loader"><div class="spinner"></div></div>
@@ -96,22 +162,61 @@
       <textarea id="textarea" placeholder="Select text on the image (left), copy with Ctrl/Cmd+C, paste here."></textarea>
     </div>
   </main>
+  <div id="toasts"></div>
 
   <script>
     const $ = id => document.getElementById(id);
     const setStatus = msg => { $('status').textContent = msg; };
 
+    function showToast(message, durationMs = 10000) {
+      const toast = document.createElement('div');
+      toast.className = 'toast';
+      const msg = document.createElement('div');
+      msg.className = 'toast-msg';
+      msg.textContent = message;
+      const close = document.createElement('button');
+      close.textContent = '×';
+      close.title = 'Dismiss';
+      close.addEventListener('click', () => toast.remove());
+      toast.appendChild(msg);
+      toast.appendChild(close);
+      $('toasts').appendChild(toast);
+      setTimeout(() => toast.remove(), durationMs);
+    }
+
+    function errorText(err) {
+      if (!err) return 'Unknown error';
+      if (typeof err === 'string') return err;
+      if (err.message) return err.message;
+      const str = JSON.stringify(err);
+      return str.length > 240 ? str.slice(0, 240) + '…' : str;
+    }
+
     $('debug').addEventListener('change', e => {
       document.body.classList.toggle('debug', e.target.checked);
     });
 
-    $('load').addEventListener('click', loadImage);
-    $('url').addEventListener('keydown', e => { if (e.key === 'Enter') loadImage(); });
-    $('api-key').addEventListener('keydown', e => { if (e.key === 'Enter') loadImage(); });
+    function loadFresh() { rotation = 0; clearMask(); loadImage(); }
+    $('load').addEventListener('click', loadFresh);
+    $('url').addEventListener('keydown', e => { if (e.key === 'Enter') loadFresh(); });
+    $('api-key').addEventListener('keydown', e => { if (e.key === 'Enter') loadFresh(); });
+
+    let rotateTimer;
+    function rotateBy(deg) {
+      rotation = ((rotation + deg) % 360 + 360) % 360;
+      setStatus(`Rotating to ${rotation}°…`);
+      clearMask();
+      clearTimeout(rotateTimer);
+      rotateTimer = setTimeout(loadImage, 250);
+    }
+    $('rotate-left').addEventListener('click',  () => rotateBy(-1));
+    $('rotate-right').addEventListener('click', () => rotateBy(1));
 
     let zoom = 1;
     let baseWidth = 0, baseHeight = 0;
+    let rotation = 0;
     let isLoading = false;
+    let pendingReload = false;
 
     function setLoading(loading) {
       isLoading = loading;
@@ -122,11 +227,11 @@
     }
 
     async function loadImage() {
-      if (isLoading) return;
+      if (isLoading) { pendingReload = true; return; }
       const imageUrl = $('url').value.trim();
       const apiKey = $('api-key').value.trim();
       if (!imageUrl) return;
-      if (!apiKey) { setStatus('API key required'); $('api-key').focus(); return; }
+      if (!apiKey) { showToast('Paste a Google Vision API key, then try again.'); $('api-key').focus(); return; }
 
       setLoading(true);
       const container = $('container');
@@ -146,12 +251,22 @@
         pane.scrollTop = 0;
         zoom = 1;
 
-        img.src = imageUrl;
+        const newSrc = `/image?url=${encodeURIComponent(imageUrl)}&rotation=${rotation}`;
         setStatus('Loading image and running OCR…');
 
-        const [_, data] = await Promise.all([imageLoaded(img), runOCR(imageUrl, apiKey)]);
+        // Attach load listener BEFORE assigning src — avoids the race where
+        // img.complete is still truthy from the previous image and imageLoaded
+        // would resolve immediately without waiting for the new one.
+        const imgPromise = new Promise((resolve, reject) => {
+          img.addEventListener('load', resolve, { once: true });
+          img.addEventListener('error', () => reject(new Error('image fetch failed: ' + newSrc)), { once: true });
+        });
+        img.src = newSrc;
+
+        const [_, data] = await Promise.all([imgPromise, runOCR(imageUrl, apiKey)]);
         if (data.error) {
-          setStatus('OCR error: ' + (data.error.message || JSON.stringify(data.error)));
+          showToast(errorText(data.error));
+          setStatus('Error');
           return;
         }
 
@@ -165,9 +280,19 @@
         renderOverlay(data.words);
         fitWords();
         applyZoom();
+        applyMaskFilter();
         setStatus(`${data.words.length} words${data.cached ? ' (cached)' : ''}`);
+      } catch (e) {
+        console.error('loadImage failed:', e);
+        showToast(errorText(e));
+        setStatus('Error');
       } finally {
         setLoading(false);
+        updateMaskButton();
+        if (pendingReload) {
+          pendingReload = false;
+          loadImage();
+        }
       }
     }
 
@@ -217,11 +342,131 @@
       setZoom(zoom * factor, anchorX, anchorY);
     }, { passive: false });
 
-    // Click-and-drag pan. Only kicks in when the mousedown isn't on a word span,
-    // so text selection still works when the user starts on the label text.
+    // Alt+drag draws a selection mask: any word whose bbox is not fully inside
+    // the mask becomes non-selectable (and is dimmed). Plain drag still pans /
+    // selects text as before.
+    let maskRect = null;
+    let maskDrawing = null;
+
+    function pointerToContainer(e) {
+      const rect = $('container').getBoundingClientRect();
+      return { x: (e.clientX - rect.left) / zoom, y: (e.clientY - rect.top) / zoom };
+    }
+
+    function setMaskWindow(x, y, w, h) {
+      const win = $('mask-window');
+      win.hidden = false;
+      win.style.left   = x + 'px';
+      win.style.top    = y + 'px';
+      win.style.width  = w + 'px';
+      win.style.height = h + 'px';
+    }
+
+    function applyMaskFilter() {
+      for (const span of $('container').querySelectorAll('.word')) {
+        if (!maskRect) { span.classList.remove('masked-out'); continue; }
+        const sx = parseFloat(span.dataset.bx);
+        const sy = parseFloat(span.dataset.by);
+        const sw = parseFloat(span.dataset.bw);
+        const sh = parseFloat(span.dataset.bh);
+        // Center-inside check: tolerant of boxes that touch or slightly cross the
+        // mask edge — they stay included as long as their centroid sits inside.
+        const cx = sx + sw / 2;
+        const cy = sy + sh / 2;
+        const inside =
+          cx >= maskRect.x && cx <= maskRect.x + maskRect.w &&
+          cy >= maskRect.y && cy <= maskRect.y + maskRect.h;
+        span.classList.toggle('masked-out', !inside);
+      }
+    }
+
+    function updateMaskButton() {
+      const btn = $('clear-mask');
+      if (!baseWidth) { btn.hidden = true; return; }
+      btn.hidden = false;
+      if (maskRect) {
+        btn.textContent = '✕ Clear mask';
+        btn.title = 'Clear selection mask';
+      } else {
+        btn.textContent = '+ Mask';
+        btn.title = 'Add a default mask in the center of the image';
+      }
+    }
+
+    function setMask(rect) {
+      // Enforce minimum size and clamp to image bounds.
+      const minSize = 20;
+      let { x, y, w, h } = rect;
+      w = Math.max(minSize, Math.min(w, baseWidth));
+      h = Math.max(minSize, Math.min(h, baseHeight));
+      x = Math.max(0, Math.min(x, baseWidth  - w));
+      y = Math.max(0, Math.min(y, baseHeight - h));
+      maskRect = { x, y, w, h };
+      setMaskWindow(x, y, w, h);
+      applyMaskFilter();
+      updateMaskButton();
+    }
+
+    function clearMask() {
+      maskRect = null;
+      $('mask-window').hidden = true;
+      applyMaskFilter();
+      updateMaskButton();
+    }
+
+    $('clear-mask').addEventListener('click', () => {
+      if (maskRect) {
+        clearMask();
+      } else if (baseWidth) {
+        // Default mask: 50% of image dimensions, centered.
+        const w = baseWidth * 0.5;
+        const h = baseHeight * 0.5;
+        setMask({ x: (baseWidth - w) / 2, y: (baseHeight - h) / 2, w, h });
+      }
+    });
+
+    // --- Mask resize via handles ------------------------------------------
+    const CURSOR_FOR_EDGE = {
+      n: 'ns-resize', s: 'ns-resize', e: 'ew-resize', w: 'ew-resize',
+      nw: 'nwse-resize', se: 'nwse-resize', ne: 'nesw-resize', sw: 'nesw-resize',
+    };
+    let resizeState = null;
+    $('mask-window').addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      const handle = e.target.closest('.mask-handle');
+      if (!handle || !maskRect) return;
+      e.preventDefault();
+      e.stopPropagation();
+      resizeState = {
+        edge: handle.dataset.edge,
+        startX: e.clientX,
+        startY: e.clientY,
+        start: { ...maskRect },
+      };
+      document.body.style.cursor = CURSOR_FOR_EDGE[resizeState.edge];
+    });
+
+    // --- Alt-key cursor hint ----------------------------------------------
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'Alt') document.body.classList.add('alt-down');
+    });
+    window.addEventListener('keyup', (e) => {
+      if (e.key === 'Alt') document.body.classList.remove('alt-down');
+    });
+    window.addEventListener('blur', () => document.body.classList.remove('alt-down'));
+
+    // Click-and-drag pan. Only kicks in when the mousedown isn't on a word span
+    // (and Alt isn't held — Alt is reserved for mask drawing).
     let panState = null;
     $('image-pane').addEventListener('mousedown', (e) => {
       if (e.button !== 0) return;
+      if (e.altKey && baseWidth) {
+        e.preventDefault();
+        const p = pointerToContainer(e);
+        maskDrawing = { startX: p.x, startY: p.y };
+        setMaskWindow(p.x, p.y, 0, 0);
+        return;
+      }
       if (e.target.classList.contains('word')) return;
       const pane = e.currentTarget;
       if (!pane.classList.contains('scrollable')) return;
@@ -233,12 +478,59 @@
       pane.classList.add('panning');
     });
     window.addEventListener('mousemove', (e) => {
+      if (resizeState) {
+        const dx = (e.clientX - resizeState.startX) / zoom;
+        const dy = (e.clientY - resizeState.startY) / zoom;
+        const s = resizeState.start;
+        let x = s.x, y = s.y, w = s.w, h = s.h;
+        if (resizeState.edge.includes('n')) { y = s.y + dy; h = s.h - dy; }
+        if (resizeState.edge.includes('s')) { h = s.h + dy; }
+        if (resizeState.edge.includes('w')) { x = s.x + dx; w = s.w - dx; }
+        if (resizeState.edge.includes('e')) { w = s.w + dx; }
+        // Clamp to min size at the dragged side, so the anchor edge stays put.
+        if (w < 20) {
+          if (resizeState.edge.includes('w')) x = s.x + s.w - 20;
+          w = 20;
+        }
+        if (h < 20) {
+          if (resizeState.edge.includes('n')) y = s.y + s.h - 20;
+          h = 20;
+        }
+        setMask({ x, y, w, h });
+        return;
+      }
+      if (maskDrawing) {
+        const p = pointerToContainer(e);
+        const x = Math.min(maskDrawing.startX, p.x);
+        const y = Math.min(maskDrawing.startY, p.y);
+        const w = Math.abs(p.x - maskDrawing.startX);
+        const h = Math.abs(p.y - maskDrawing.startY);
+        setMaskWindow(x, y, w, h);
+        return;
+      }
       if (!panState) return;
       const pane = $('image-pane');
       pane.scrollLeft = panState.startScrollLeft - (e.clientX - panState.startX);
       pane.scrollTop  = panState.startScrollTop  - (e.clientY - panState.startY);
     });
-    window.addEventListener('mouseup', () => {
+    window.addEventListener('mouseup', (e) => {
+      if (resizeState) {
+        resizeState = null;
+        document.body.style.cursor = '';
+        return;
+      }
+      if (maskDrawing) {
+        const p = pointerToContainer(e);
+        const x = Math.min(maskDrawing.startX, p.x);
+        const y = Math.min(maskDrawing.startY, p.y);
+        const w = Math.abs(p.x - maskDrawing.startX);
+        const h = Math.abs(p.y - maskDrawing.startY);
+        maskDrawing = null;
+        // Treat a tiny rectangle as a click — clear any existing mask.
+        if (w < 6 || h < 6) { clearMask(); return; }
+        setMask({ x, y, w, h });
+        return;
+      }
       if (!panState) return;
       panState = null;
       $('image-pane').classList.remove('panning');
@@ -248,7 +540,7 @@
       const res = await fetch('/ocr', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageUrl, apiKey, languageHints: ['uk', 'en'] })
+        body: JSON.stringify({ imageUrl, apiKey, rotation, languageHints: ['uk', 'en'] })
       });
       return res.json();
     }
@@ -272,11 +564,18 @@
         const span = document.createElement('span');
         span.className = 'word';
         span.textContent = w.text;
-        span.style.left     = (w.x * scale) + 'px';
-        span.style.top      = (w.y * scale) + 'px';
-        span.style.width    = (w.w * scale) + 'px';
-        span.style.height   = (w.h * scale) + 'px';
-        span.style.fontSize = (w.h * scale) + 'px';
+        const bx = w.x * scale, by = w.y * scale, bw = w.w * scale, bh = w.h * scale;
+        span.style.left     = bx + 'px';
+        span.style.top      = by + 'px';
+        span.style.width    = bw + 'px';
+        span.style.height   = bh + 'px';
+        span.style.fontSize = bh + 'px';
+        // Preserve true bbox; fitWords() will mutate style.width to the natural
+        // text width for horizontal stretching, which would corrupt mask checks.
+        span.dataset.bx = bx;
+        span.dataset.by = by;
+        span.dataset.bw = bw;
+        span.dataset.bh = bh;
         frag.appendChild(span);
       }
       container.appendChild(frag);
@@ -308,6 +607,7 @@
 
       const parts = [];
       for (const span of container.querySelectorAll('.word')) {
+        if (span.classList.contains('masked-out')) continue;
         if (!range.intersectsNode(span)) continue;
         const text = span.textContent;
         const node = span.firstChild;
@@ -330,7 +630,7 @@
       }, 150);
     });
 
-    loadImage();
+    setStatus('Paste API key and click Load & OCR');
   </script>
 </body>
 </html>
